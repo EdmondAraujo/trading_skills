@@ -158,7 +158,7 @@ The MCP server is a lightweight alternative for use with Claude Desktop (includi
 - "Generate portfolio action report" (requires IB)
 - "Find roll candidates for my GOOG short call" (requires IB)
 
-## Available Skills (21)
+## Available Skills (22)
 
 ### Market Data
 | Skill | Description |
@@ -183,6 +183,7 @@ The MCP server is a lightweight alternative for use with Claude Desktop (includi
 |-------|-------------|
 | `scanner-bullish` | Scan symbols for bullish trends (SMA, RSI, MACD, ADX) |
 | `scanner-pmcc` | Scan for PMCC suitability (delta, liquidity, spread, IV, yield) |
+| `whale-hunting` | Detect institutional option whale activity for an underlying (requires Massive API key) |
 
 ### Portfolio (requires TWS/Gateway)
 | Skill | Description |
@@ -201,7 +202,7 @@ The MCP server is a lightweight alternative for use with Claude Desktop (includi
 |-------|-------------|
 | `report-stock` | Comprehensive PDF/markdown report with trend, PMCC, and fundamental analysis |
 
-## MCP Server Tools (23 tools)
+## MCP Server Tools (24 tools)
 
 The MCP server exposes a subset of skills as tools for Claude Desktop:
 
@@ -212,6 +213,7 @@ The MCP server exposes a subset of skills as tools for Claude Desktop:
 | **Options** | `option_expiries`, `option_chain`, `option_greeks` |
 | **Spreads** | `spread_vertical`, `spread_diagonal`, `spread_straddle`, `spread_strangle`, `spread_iron_condor` |
 | **Scanners** | `scan_bullish`, `scan_pmcc` |
+| **Whale Hunting** | `whale_hunting` |
 | **IB Portfolio** | `ib_account`, `ib_portfolio`, `ib_find_short_roll`, `ib_portfolio_action_report` |
 
 ## Sandbox Outputs (Not Committed)
@@ -225,6 +227,54 @@ To use IB features:
 1. Install [TWS](https://www.interactivebrokers.com/en/trading/tws.php) or [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php)
 2. Enable API connections in TWS: Configure → API → Settings → Enable ActiveX and Socket Clients
 3. Note the port: 7497 (paper) or 7496 (live)
+
+## Massive (formerly Polygon.io) Setup
+
+Whale-detection features (`option_whales`, `whales_hunter`) require a [Massive](https://massive.com/) API key (the platform was previously known as Polygon.io).
+
+### Claude Code / Cursor
+
+Create a `.env` file in the repository root:
+
+```bash
+MASSIVE_API_KEY=your_polygon_api_key_here
+```
+
+The library loads it automatically via `python-dotenv`.
+
+### MCP Server (Claude Desktop)
+
+Pass the key through the `env` field in `claude_desktop_config.json`:
+
+**macOS / Linux:**
+```json
+{
+  "mcpServers": {
+    "trading-skills": {
+      "command": "/full/path/to/trading-skills-mcp",
+      "env": {
+        "MASSIVE_API_KEY": "your_massive_api_key_here"
+      }
+    }
+  }
+}
+```
+
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "trading-skills": {
+      "command": "C:\\full\\path\\to\\trading-skills-mcp.exe",
+      "env": {
+        "MASSIVE_API_KEY": "your_massive_api_key_here"
+      }
+    }
+  }
+}
+```
+
+> The `env` block is merged with the system environment, so other variables are not affected.
 
 ## Development
 
