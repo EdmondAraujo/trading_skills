@@ -479,7 +479,7 @@ async def _place_combo_stop_order(
     leaps_leg = ComboLeg()
     leaps_leg.conId = qualified[0].conId
     leaps_leg.ratio = 1
-    leaps_leg.action = "SELL"
+    leaps_leg.action = "BUY"
     leaps_leg.exchange = "SMART"
     legs.append(leaps_leg)
 
@@ -487,7 +487,7 @@ async def _place_combo_stop_order(
         short_leg = ComboLeg()
         short_leg.conId = qc.conId
         short_leg.ratio = 1
-        short_leg.action = "BUY"
+        short_leg.action = "SELL"
         short_leg.exchange = "SMART"
         legs.append(short_leg)
 
@@ -585,11 +585,10 @@ async def _execute_position_stop(
     if open_orders:
         trades_by_id = {t.order.orderId: t for t in ib.openTrades()}
         for o in open_orders:
-            if o.get("order_ref") == order_ref:
+            if o.get("symbol") == symbol and o.get("conditions"):
                 oid = o.get("order_id")
                 if oid and oid in trades_by_id:
                     ib.cancelOrder(trades_by_id[oid].order)
-                break
 
     if ptype == "pmcc":
         if not leaps_con_id:

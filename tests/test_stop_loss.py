@@ -889,6 +889,53 @@ class TestExecutePositionStop:
         )
         assert result["ok"] is False
 
+    def test_cancels_all_symbol_orders_before_placing_new(self):
+        # Any existing conditional order for the symbol (manual or SL_) must be
+        # cancelled before placing the new SL_ order, not just the exact-ref match.
+        mock_ib = MagicMock()
+        manual_trade = MagicMock()
+        manual_trade.order.orderId = 77
+        sl_trade = MagicMock()
+        sl_trade.order.orderId = 78
+        mock_ib.openTrades.return_value = [manual_trade, sl_trade]
+
+        open_orders = [
+            # Manual order for same symbol (empty order_ref)
+            {
+                "order_id": 77,
+                "order_ref": "",
+                "symbol": "NVDA",
+                "conditions": [{"price": 1000.0, "is_more": True}],
+            },
+            # Stale SL_ order for same symbol with different key
+            {
+                "order_id": 78,
+                "order_ref": "SL_FALL_NVDA_190.0_20270115",
+                "symbol": "NVDA",
+                "conditions": [{"price": 10.0, "is_more": False}],
+            },
+        ]
+
+        expected = {"ok": True, "order_id": 99, "order_ref": "SL_FALL_NVDA_200.0_20270115"}
+        with patch(
+            "trading_skills.broker.stop_loss._place_combo_stop_order",
+            new=AsyncMock(return_value=expected),
+        ):
+            asyncio.run(
+                _execute_position_stop(
+                    mock_ib,
+                    self._pmcc_analysis("place_new"),
+                    leaps_con_id=111,
+                    stock_con_id=None,
+                    open_orders=open_orders,
+                )
+            )
+
+        # Both orders for the symbol must be cancelled
+        cancelled_orders = [call.args[0] for call in mock_ib.cancelOrder.call_args_list]
+        cancelled_ids = {o.orderId for o in cancelled_orders}
+        assert cancelled_ids == {77, 78}
+
 
 # ---------------------------------------------------------------------------
 # get_stop_loss_data — minimal integration (mocked IB)
