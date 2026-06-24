@@ -12,6 +12,8 @@ import pytest
 from trading_skills.broker.pmcc_advisor import (
     _fetch_option_quotes_batch,
     _fetch_single_option_quote,
+    _next_roll_expirations,
+    _roll_strike_range,
     build_comparison_table,
     calc_assignment_prob,
     calc_bs_price,
@@ -24,7 +26,6 @@ from trading_skills.broker.pmcc_advisor import (
     filter_spreads_by_symbols,
     find_best_rolls,
     find_optimal_exit_spot,
-    find_roll_expiration_targets,
     get_option_price,
     score_roll_candidate,
 )
@@ -277,35 +278,91 @@ def test_find_optimal_exit_spot_above_short_strike():
     assert isinstance(pnl, float)
 
 
-def test_find_roll_expiration_targets_basic():
-    """Should return two expirations near 7d and 14d after current."""
-    from datetime import date, datetime, timedelta
-
+def test_next_roll_expirations_returns_up_to_5():
+    """Should return next 5 expirations after current, not just 2 near 7d/14d."""
     today = date.today()
     current = today.strftime("%Y%m%d")
-    # Generate fake expirations at various offsets
-    expirations = [(today + timedelta(days=d)).strftime("%Y%m%d") for d in [5, 8, 14, 21, 35, 60]]
+    expirations = [
+        (today + timedelta(days=d)).strftime("%Y%m%d") for d in [5, 8, 14, 21, 28, 35, 60]
+    ]
     max_exp = (today + timedelta(days=90)).strftime("%Y%m%d")
-    result = find_roll_expiration_targets(current, expirations, max_exp)
-    assert len(result) == 2
-    # First target is closest to +7d, second to +14d
-    r0 = (datetime.strptime(result[0], "%Y%m%d").date() - today).days
-    r1 = (datetime.strptime(result[1], "%Y%m%d").date() - today).days
-    assert abs(r0 - 7) <= 3
-    assert abs(r1 - 14) <= 3
+    result = _next_roll_expirations(current, expirations, max_exp)
+    # Should return 5 of the 6 available future expirations (5, 8, 14, 21, 28, 35 are all > current,
+    # but 5 is exactly = current+5 so still in future; capped at 5)
+    assert len(result) == 5
 
 
-def test_find_roll_expiration_targets_respects_max():
-    """Expirations beyond long expiry must be excluded."""
-    from datetime import date, timedelta
-
+def test_next_roll_expirations_respects_max_expiry():
+    """Expirations beyond max_expiry (LEAPS expiry) must be excluded."""
     today = date.today()
     current = today.strftime("%Y%m%d")
     max_exp = (today + timedelta(days=10)).strftime("%Y%m%d")
     expirations = [(today + timedelta(days=d)).strftime("%Y%m%d") for d in [7, 14, 21]]
-    result = find_roll_expiration_targets(current, expirations, max_exp)
+    result = _next_roll_expirations(current, expirations, max_exp)
     for exp in result:
         assert exp <= max_exp
+
+
+def test_next_roll_expirations_empty_when_none_available():
+    """Returns empty list when no future expirations exist."""
+    result = _next_roll_expirations("20260620", [], "20270101")
+    assert result == []
+
+
+def test_next_roll_expirations_sorted():
+    """Returned expirations are in ascending order."""
+    today = date.today()
+    current = today.strftime("%Y%m%d")
+    expirations = [(today + timedelta(days=d)).strftime("%Y%m%d") for d in [21, 7, 35, 14]]
+    max_exp = (today + timedelta(days=90)).strftime("%Y%m%d")
+    result = _next_roll_expirations(current, expirations, max_exp)
+    assert result == sorted(result)
+
+
+# ---------------------------------------------------------------------------
+# _roll_strike_range
+# ---------------------------------------------------------------------------
+
+
+def test_roll_strike_range_includes_short_and_above():
+    """Range spans from just below the short strike up to ~15% above spot."""
+    strikes = [180, 190, 200, 205, 210, 215, 220, 225, 240, 260]
+    result = _roll_strike_range(short_strike=210.0, spot=200.0, all_strikes=strikes)
+    assert 210 in result  # current short strike (same-strike forward roll)
+    assert 215 in result
+    assert 225 in result  # within spot * 1.15 = 230
+    assert 240 not in result
+
+
+def test_roll_strike_range_excludes_deep_itm():
+    """Deeply ITM strikes (well below the short) are excluded to limit subscriptions."""
+    strikes = [150, 160, 180, 203, 210, 220]
+    result = _roll_strike_range(short_strike=210.0, spot=200.0, all_strikes=strikes)
+    assert 150 not in result
+    assert 160 not in result
+    assert 180 not in result  # below short * 0.97 = 203.7
+    assert 203 not in result
+
+
+def test_roll_strike_range_excludes_far_otm():
+    """Strikes far above the upper bound are excluded."""
+    strikes = [210, 220, 230, 240, 260, 300]
+    result = _roll_strike_range(short_strike=210.0, spot=200.0, all_strikes=strikes)
+    assert 260 not in result
+    assert 300 not in result
+
+
+def test_roll_strike_range_empty_when_no_spot():
+    """No spot price -> empty range (cannot compute upper bound)."""
+    assert _roll_strike_range(short_strike=210.0, spot=0, all_strikes=[200, 210, 220]) == []
+
+
+def test_roll_strike_range_covers_short_when_deep_otm():
+    """When the short is >15% OTM, the short strike is still covered for a forward roll."""
+    # QCOM-like: short 260, spot 205 -> spot * 1.15 = 235.75 < 260
+    strikes = [250, 255, 260, 265, 270]
+    result = _roll_strike_range(short_strike=260.0, spot=205.0, all_strikes=strikes)
+    assert 260 in result
 
 
 def test_calc_daily_pnl_table_scales_with_qty():
@@ -438,14 +495,14 @@ def test_find_best_rolls_returns_at_most_3():
     assert len(rolls) <= 3
 
 
-def test_find_best_rolls_filters_by_delta():
-    """Candidates with delta >= current_delta must be excluded."""
-    # At spot=108, IV=0.3, strike=109, 30 dte → delta ≈ 0.49 (high)
-    # strike=125, 30 dte → delta should be much lower
+def test_find_best_rolls_filters_by_max_delta():
+    """Candidates with delta above MAX_SHORT_DELTA (0.40) must be excluded."""
+    # At spot=108, IV=0.3, strike=109, 30 dte → delta ≈ 0.49 (above 0.40 cap — filtered)
+    # strike=130, 30 dte → delta much lower (below 0.40 cap — passes)
     roll_chains = {
         _EXP_ROLL: [
-            _make_quote(109, 3.50, 3.80, _EXP_ROLL),  # near ATM, high delta — should be filtered
-            _make_quote(130, 0.50, 0.70, _EXP_ROLL),  # OTM, low delta — should pass
+            _make_quote(109, 3.50, 3.80, _EXP_ROLL),  # near ATM, delta ~0.49 — filtered
+            _make_quote(130, 0.50, 0.70, _EXP_ROLL),  # OTM, low delta — passes
         ],
     }
     rolls = find_best_rolls(
@@ -453,7 +510,7 @@ def test_find_best_rolls_filters_by_delta():
         current_short_expiry="20260501",
         current_short_dte=1,
         current_short_price=0.10,
-        current_delta=0.45,  # filtering threshold
+        current_delta=0.45,
         roll_chains=roll_chains,
         spot=108.0,
         long_strike=90.0,
@@ -464,9 +521,11 @@ def test_find_best_rolls_filters_by_delta():
         min_roll_dte=7,
         price_mode="mid",
     )
-    # All returned rolls must have delta < 0.45
+    # All returned rolls must have delta <= MAX_SHORT_DELTA (0.40)
+    from trading_skills.broker.pmcc_advisor import MAX_SHORT_DELTA
+
     for roll in rolls:
-        assert roll["delta"] < 0.45
+        assert roll["delta"] <= MAX_SHORT_DELTA
 
 
 def test_find_best_rolls_requires_net_credit():
@@ -868,16 +927,6 @@ def test_calc_assignment_prob_zero_iv():
     assert result == 0.0
 
 
-def test_find_roll_expiration_targets_empty_candidates():
-    """Returns empty list when no candidates are available after current expiry."""
-    result = find_roll_expiration_targets(
-        current_expiry="20260620",
-        available_expirations=[],
-        max_expiry="20270101",
-    )
-    assert result == []
-
-
 def test_ibkr_to_yf_date():
     from trading_skills.broker.pmcc_advisor import _ibkr_to_yf_date
 
@@ -935,6 +984,35 @@ def test_find_best_rolls_skips_small_dte():
     if result:
         for r in result:
             assert r["expiry"] == far_expiry
+
+
+def test_find_best_rolls_includes_forward_roll_when_current_is_near_expiry():
+    """Issue #106: near-expiry short has tiny delta; same-strike forward roll has higher
+    delta but is still a valid and desirable roll — should not be filtered out."""
+    exp14 = (date.today() + timedelta(days=14)).strftime("%Y%m%d")
+    roll_chains = {
+        # BTC near-worthless short ($0.20), collect $0.80 by rolling forward → +$0.60 credit
+        exp14: [_make_quote(185, 0.70, 0.90, exp14)],
+    }
+    rolls = find_best_rolls(
+        current_short_strike=185,
+        current_short_expiry="20260501",
+        current_short_dte=3,
+        current_short_price=0.20,
+        current_delta=0.15,  # near expiry — very low delta
+        roll_chains=roll_chains,
+        spot=180.0,
+        long_strike=160.0,
+        long_cost=22.0,
+        long_dte=300.0,
+        long_iv=0.30,
+        qty=1,
+        min_roll_dte=7,
+        price_mode="mid",
+    )
+    # The roll candidate has delta ~0.22-0.25 (> current 0.15 due to more DTE).
+    # Old code filtered it out via `delta >= current_delta`. New code uses absolute cap.
+    assert len(rolls) > 0, "Forward roll rejected when delta > near-expiry delta"
 
 
 def test_find_best_rolls_skips_same_expiry_as_current_short():
@@ -1044,3 +1122,41 @@ def test_fetch_option_quotes_batch_falls_back_to_close_when_last_is_nan():
     assert len(results) == 1
     assert results[0]["last"] == pytest.approx(3.75)
     assert results[0]["stale"] is True
+
+
+# ---------------------------------------------------------------------------
+# data_delay label (issue #68)
+# ---------------------------------------------------------------------------
+
+
+def test_data_delay_real_time_when_live():
+    from trading_skills.broker.pmcc_advisor import _data_delay_label
+
+    assert _data_delay_label(live=True, extended_prices={}, quote_stale=False) == "real-time"
+
+
+def test_data_delay_extended_hours_when_ibkr_prices_returned():
+    from trading_skills.broker.pmcc_advisor import _data_delay_label
+
+    assert (
+        _data_delay_label(live=False, extended_prices={"NVDA": 210.0}, quote_stale=False)
+        == "extended-hours"
+    )
+
+
+def test_data_delay_stalled_when_no_extended_prices():
+    from trading_skills.broker.pmcc_advisor import _data_delay_label
+
+    assert (
+        _data_delay_label(live=False, extended_prices={}, quote_stale=False)
+        == "stalled - using last price"
+    )
+
+
+def test_data_delay_stalled_overrides_extended_when_quote_stale():
+    from trading_skills.broker.pmcc_advisor import _data_delay_label
+
+    assert (
+        _data_delay_label(live=False, extended_prices={"NVDA": 210.0}, quote_stale=True)
+        == "stalled - using last price"
+    )
